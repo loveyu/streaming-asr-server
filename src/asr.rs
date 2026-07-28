@@ -4,11 +4,11 @@ use crate::config::Config;
 
 pub struct AsrEngine {
     recognizer: sherpa_onnx::OnlineRecognizer,
-    sample_rate: i32,
 }
 
 pub struct AsrStream {
     stream: sherpa_onnx::OnlineStream,
+    sample_rate: i32,
     segment: u32,
 }
 
@@ -50,22 +50,25 @@ impl AsrEngine {
         let recognizer = sherpa_onnx::OnlineRecognizer::create(&cfg)
             .ok_or_else(|| anyhow::anyhow!("Failed to create OnlineRecognizer"))?;
 
-        tracing::info!("OnlineRecognizer created, sample_rate={}", config.sample_rate);
+        tracing::info!("OnlineRecognizer created");
 
         Ok(Self {
             recognizer,
-            sample_rate: config.sample_rate,
         })
     }
 
-    pub fn create_stream(&self) -> AsrStream {
+    pub fn create_stream(&self, sample_rate: i32) -> AsrStream {
         let stream = self.recognizer.create_stream();
-        AsrStream { stream, segment: 0 }
+        AsrStream {
+            stream,
+            sample_rate,
+            segment: 0,
+        }
     }
 
     pub fn accept_waveform(&self, stream: &mut AsrStream, pcm: &[i16]) -> Option<String> {
         let samples: Vec<f32> = pcm.iter().map(|&s| s as f32 / 32768.0).collect();
-        stream.stream.accept_waveform(self.sample_rate, &samples);
+        stream.stream.accept_waveform(stream.sample_rate, &samples);
 
         while self.recognizer.is_ready(&stream.stream) {
             self.recognizer.decode(&stream.stream);

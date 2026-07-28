@@ -7,7 +7,6 @@ use tokio::time::timeout;
 
 use crate::asr::{AsrEngine, AsrStream};
 use crate::protocol::{ClientMessage, ServerMessage};
-
 use crate::session::SessionGuard;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -96,8 +95,8 @@ pub async fn handle_ws(ws: WebSocket, engine: Arc<AsrEngine>, _guard: SessionGua
                 };
 
                 match cmd {
-                    ClientMessage::Start => {
-                        stream = Some(engine.create_stream());
+                    ClientMessage::Start(cmd) => {
+                        stream = Some(engine.create_stream(cmd.sample_rate));
                         segment = 0;
                         let _ = sender
                             .send(Message::Text(Utf8Bytes::from(

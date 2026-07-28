@@ -42,9 +42,9 @@ HTTP 升级请求时携带对应 Header。鉴权失败返回 `401 Unauthorized` 
 | 参数 | 值 |
 |------|-----|
 | 编码 | PCM 16-bit signed little-endian |
-| 采样率 | 16000 Hz |
+| 采样率 | 任意，通过 `start` 消息的 `sample_rate` 指定（默认 16000）|
 | 声道 | 单声道 |
-| 帧大小 | 无限制（建议 100ms = 3200 bytes） |
+| 帧大小 | 无限制（建议 100ms × 采样率对应的字节数）|
 | 传输方式 | WebSocket Binary 帧 |
 
 ## 协议流程
@@ -88,8 +88,9 @@ Client                          Server
 
 ```json
 {"type":"start"}
+{"type":"start","sample_rate":8000}
 ```
-收到后服务端重置识别状态，回复 `listening`。
+`sample_rate` 可选，默认 16000。客户端按实际音频采样率传递，服务端自动适配。支持 8000/16000/22050/44100/48000 等常见采样率。收到后服务端重置识别状态，回复 `listening`。
 
 **结束当前句：**
 

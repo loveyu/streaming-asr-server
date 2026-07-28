@@ -1,10 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+fn default_sample_rate() -> i32 {
+    16000
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartCommand {
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: i32,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
     #[serde(rename = "start")]
-    Start,
+    Start(StartCommand),
     #[serde(rename = "finish")]
     Finish,
     #[serde(rename = "ping")]
