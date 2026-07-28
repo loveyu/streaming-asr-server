@@ -25,3 +25,8 @@ futures-util = "0.3"
 anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+bzip2 = "0.5"
+tar = "0.4"
+tokio-stream = "0.1"
+sherpa-onnx = "1"
