@@ -49,6 +49,7 @@ main.rs → ws_handler.rs → asr.rs → sherpa-onnx
               ↑              ↑
          protocol.rs    session.rs (Semaphore)
          auth.rs        config.rs → model.rs
+         logging.rs (tracing + 文件 appender)
 ```
 
 - **OnlineRecognizer** 全进程共享，各 WS 会话独立 `OnlineStream`（sherpa-onnx 原生支持多 stream）
@@ -60,9 +61,16 @@ main.rs → ws_handler.rs → asr.rs → sherpa-onnx
 
 `src/protocol.rs` 定义全部帧类型。Client→Server 三种：`start` / `finish` / `ping`。Server→Client 六种：`ready` / `listening` / `partial` / `final` / `pong` / `error`。
 
-连接复用时 `finish` 后回到 `ready`，不关闭连接，可重复 `start→finish`。
+健壮性约定（见 `docs/../fcitx5-plugin-quicksend/docs/remote-asr-server-requirements.md` 的 R1~R6）：
 
-空闲 60 秒无帧 → 服务端发 fatal error 断开。
+- **error 帧结构化**：`{type:error, code, message, fatal, retry}`。`code` ∈ `idle|connection|auth|internal|overload|protocol`。fatal 仅 `connection`/`auth`/`internal`；`idle`/`overload`/`protocol` 可恢复。
+- **idle 非致命（R1）**：空闲超时先补发本轮 `final`（可为空）→ 发非致命 `error(code:idle, retry:true)` → 发 close 帧优雅关闭。**绝不**把 idle 标 fatal。
+- **心跳探活（R3）**：`ws_handler.rs` 用 `tokio::select!` 在 `receiver.next()` 与 15s 心跳之间轮转；心跳发 WebSocket `Ping` 探活，并据此判定 idle。断连前尽量补发 `final` 再 close。
+- **idle 可配（R4）**：`--idle-timeout`（默认 60s）；`start` 可带 `idle_seconds` 按轮覆盖（钳制 5~600s）。
+- **鉴权结构化（R5）**：鉴权失败返回 HTTP 401 + JSON `{code:auth, fatal:true, retry:false}`。
+- **状态机（R6）**：`start → listening → partial* → final → ready` 稳定流转；重复 `start` 先补发上一轮 `final`；`final` 后清理本轮状态。
+
+连接复用时 `finish` 后回到 `ready`，不关闭连接，可重复 `start→finish`。
 
 ## 鉴权与并发顺序
 
@@ -80,11 +88,18 @@ main.rs → ws_handler.rs → asr.rs → sherpa-onnx
 
 `audio_real_file_pipeline` 使用 `tests/fixtures/zh-test.pcm`（中文真实音频）。
 
+## 日志
+
+`src/logging.rs` 统一初始化 `tracing`：同时输出到 stderr 与一个追加文件。
+
+- **等级**：`--log-level` > `$ASR_LOG` > `$RUST_LOG` > `info`。`ASR_LOG` 也接受完整指令（`streaming_asr_server=debug`）。
+- **文件**：`--log-file` / `$ASR_LOG_FILE` 按字面路径使用；默认按 `/var/log/asr-server` → 用户状态目录 → 临时目录回退。`--no-log-file` 仅 stderr。
+- 用 `tracing_appender::rolling::never` 同步写盘（非 `non_blocking`），保证 `SIGTERM` 不丢缓冲日志。
+
 ## 待清理
 
-- `sha2`、`hex`、`toml` 声明但未使用，可移除
 - `tests/fixtures/en-test.pcm` 存在但无测试引用
-- 缺少 SIGTERM 优雅退出
+- 缺少 SIGTERM 优雅退出（当前靠同步写盘保证日志不丢，但未做连接排空）
 
 ## 部署
 
@@ -99,7 +114,10 @@ asr-server \
   --tls-key /etc/asr/key.pem \
   --auth-token "$(cat /etc/asr/token)" \
   --max-sessions 2 \
-  --num-threads 4
+  --num-threads 4 \
+  --idle-timeout 60 \
+  --log-level info \
+  --log-file /var/log/asr-server/asr-server.log
 ```
 
 ## 文档

@@ -1,6 +1,7 @@
 mod asr;
 mod auth;
 mod config;
+mod logging;
 mod model;
 mod protocol;
 mod session;
@@ -8,6 +9,7 @@ mod ws_handler;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{ConnectInfo, WebSocketUpgrade};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -18,7 +20,7 @@ use clap::Parser;
 
 use crate::asr::AsrEngine;
 use crate::config::Config;
-use crate::protocol::BusyResponse;
+use crate::protocol::HttpError;
 use crate::session::SessionManager;
 
 #[derive(Clone)]
@@ -26,6 +28,7 @@ pub struct AppState {
     pub engine: Arc<AsrEngine>,
     pub session_manager: Arc<SessionManager>,
     pub auth_token: Option<String>,
+    pub idle_timeout: Duration,
 }
 
 pub async fn ws_handler(
@@ -37,7 +40,12 @@ pub async fn ws_handler(
     if let Some(ref expected_token) = state.auth_token {
         if !auth::verify_token(&headers, expected_token) {
             tracing::warn!("Auth failed from {addr}");
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::CONTENT_TYPE, "application/json")],
+                HttpError::auth().to_json(),
+            )
+                .into_response();
         }
     }
 
@@ -48,7 +56,7 @@ pub async fn ws_handler(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::CONTENT_TYPE, "application/json")],
-                BusyResponse::to_json(),
+                HttpError::busy().to_json(),
             )
                 .into_response();
         }
@@ -56,19 +64,18 @@ pub async fn ws_handler(
 
     tracing::info!("WS connection from {addr}");
 
-    ws.on_upgrade(move |socket| ws_handler::handle_ws(socket, state.engine.clone(), guard))
+    ws.on_upgrade(move |socket| {
+        ws_handler::handle_ws(socket, state.engine.clone(), guard, state.idle_timeout)
+    })
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let mut config = Config::parse();
+
+    // Initialize logging early so model download / startup are captured.
+    logging::init(config.log_level, config.log_file.clone(), config.no_log_file)?;
+
     config.canonicalize()?;
 
     if (config.tls_cert.is_some()) != (config.tls_key.is_some()) {
@@ -84,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         engine,
         session_manager,
         auth_token: config.auth_token.clone(),
+        idle_timeout: config.idle_timeout(),
     });
 
     let app = Router::new()
@@ -94,9 +102,11 @@ async fn main() -> anyhow::Result<()> {
     let use_tls = config.tls_cert.is_some();
 
     tracing::info!(
-        "Starting ASR server on {} (TLS: {})",
+        "Starting ASR server on {} (TLS: {}, max_sessions: {}, idle_timeout: {}s)",
         bind_addr,
-        use_tls
+        use_tls,
+        config.max_sessions,
+        config.idle_timeout
     );
 
     if let (Some(cert), Some(key)) = (&config.tls_cert, &config.tls_key) {
@@ -155,6 +165,10 @@ mod tests {
             endpoint_silence: 1.2,
             endpoint_max_utterance: 20.0,
             sample_rate: 16000,
+            idle_timeout: 60.0,
+            log_level: None,
+            log_file: None,
+            no_log_file: true,
         }
     }
 
@@ -167,6 +181,7 @@ mod tests {
             engine,
             session_manager,
             auth_token: None,
+            idle_timeout: config.idle_timeout(),
         });
 
         let app = Router::new()
@@ -282,6 +297,7 @@ mod tests {
         let text = msg.into_text().unwrap();
         assert_eq!(field(&text, "type"), "error");
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["code"].as_str().unwrap(), "protocol");
         assert!(!v["fatal"].as_bool().unwrap_or(true));
     }
 
@@ -310,6 +326,7 @@ mod tests {
             engine,
             session_manager,
             auth_token: None,
+            idle_timeout: config.idle_timeout(),
         });
 
         let app = Router::new()
@@ -345,6 +362,7 @@ mod tests {
             engine,
             session_manager,
             auth_token: Some("secret".into()),
+            idle_timeout: config.idle_timeout(),
         });
 
         let app = Router::new()

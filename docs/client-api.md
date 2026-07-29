@@ -25,7 +25,13 @@ Authorization: Bearer <token>
 X-ASR-Token: <token>
 ```
 
-HTTP 升级请求时携带对应 Header。鉴权失败返回 `401 Unauthorized` 并关闭连接。
+HTTP 升级请求时携带对应 Header。鉴权失败返回 HTTP `401`，响应体 JSON：
+
+```json
+{"error":"auth","code":"auth","message":"Unauthorized","fatal":true,"retry":false}
+```
+
+`code` 为 `auth`、`fatal:true`，客户端应据此提示"请检查远端 Token 配置"，而非静默回退本地。
 
 ## 并发限制
 
@@ -89,8 +95,13 @@ Client                          Server
 ```json
 {"type":"start"}
 {"type":"start","sample_rate":8000}
+{"type":"start","sample_rate":16000,"idle_seconds":30}
 ```
-`sample_rate` 可选，默认 16000。客户端按实际音频采样率传递，服务端自动适配。支持 8000/16000/22050/44100/48000 等常见采样率。收到后服务端重置识别状态，回复 `listening`。
+- `sample_rate` 可选，默认 16000。客户端按实际音频采样率传递，服务端自动适配。支持 8000/16000/22050/44100/48000 等常见采样率。
+- `idle_seconds` 可选，客户端建议的本轮空闲超时秒数。服务端按需采纳（钳制到 5~600s）。
+  未提供时使用服务端默认（`--idle-timeout`，默认 60s）。
+
+收到后服务端重置识别状态，回复 `listening`。若上一轮未 `finish` 就再次 `start`，服务端会先补发上一轮的 `final` 再开始新轮，避免已识别内容丢失。
 
 **结束当前句：**
 
@@ -151,33 +162,49 @@ PCM 16-bit LE 16000Hz 单声道原始音频。帧大小不限，建议 100ms（3
 {"type":"pong"}
 ```
 
-**错误通知：**
+**错误通知（结构化，R2）：**
 
 ```json
 {
   "type": "error",
-  "message": "not listening, send start first",
-  "fatal": false
+  "code": "idle",
+  "message": "idle timeout",
+  "fatal": false,
+  "retry": true
 }
 ```
 
-- `fatal: false` — 可恢复，连接保持
-- `fatal: true` — 服务端即将关闭连接
+| 字段 | 含义 |
+|------|------|
+| `code` | 错误分类：`idle` / `connection` / `auth` / `internal` / `overload` / `protocol` |
+| `fatal` | `false` 可恢复，连接保持；`true` 服务端即将关闭连接 |
+| `retry` | 客户端是否可重试/重连 |
+
+`fatal` 语义：仅 `connection`（链路断）、`auth`、`internal` 为 fatal；`idle`、`overload`、`protocol` 等可恢复。
+
+> 空闲超时（`code:"idle"`）属于业务级结束，**不是** `fatal`。客户端不应据此判定远端不可用或回退本地。
 
 ## 空闲超时
 
-60 秒内无任何帧（包括 ping），服务端主动发送 `fatal error` 并关闭连接。建议至少每 30 秒发一次 `ping`。
+服务端默认 60s 内无任何帧（含 `ping`/音频）即视为本轮结束（`--idle-timeout` 可配，也可在 `start` 中用 `idle_seconds` 按轮覆盖）。触发时服务端：
+
+1. 补发本轮已识别的 `final`（含已识别文本，可为空，R1/R3）；
+2. 发送非致命 `error`（`code:"idle"`，`fatal:false`，`retry:true`）；
+3. 发送 WebSocket `close` 帧优雅关闭（R3）。
+
+因此**不会**出现"用户停顿即被判远端失败"。建议客户端仍每 ~30s 发一次 `{"type":"ping"}` 以防中间代理断开空闲连接；服务端还会每 15s 主动发 WebSocket `Ping` 探活并清理半开连接（R3）。
 
 ## 错误码与场景
 
-| 场景 | HTTP / WS | 行为 |
-|------|-----------|------|
-| 鉴权失败 | HTTP `401` | 关闭连接，不占槽位 |
-| 槽位满 | HTTP `503` + JSON | 关闭连接，建议降级 |
-| 未 start 发送音频 | WS `error`, `fatal:false` | 连接保持 |
-| 非法 JSON | WS `error`, `fatal:false` | 连接保持 |
-| 空闲超时 | WS `error`, `fatal:true` | 关闭连接 |
-| 客户端断连 | — | 释放槽位 |
+| 场景 | HTTP / WS | `code` | `fatal` | `retry` | 行为 |
+|------|-----------|--------|---------|---------|------|
+| 鉴权失败 | HTTP `401` + JSON | `auth` | true | false | 关闭连接，提示检查 Token |
+| 槽位满 | HTTP `503` + JSON | `overload` | false | true | 关闭连接，可退避重试/降级 |
+| 未 start 发送音频 | WS `error` | `protocol` | false | false | 连接保持 |
+| 非法 JSON | WS `error` | `protocol` | false | false | 连接保持 |
+| 空闲超时 | WS `final` + `error` | `idle` | false | true | 补发 final 后优雅关闭 |
+| 链路异常 | WS `final` + `error` | `connection` | true | true | 尝试补发 final 后关闭 |
+| 客户端正常断连 | WS `close` | — | — | — | 释放槽位 |
 
 ## 客户端参考实现
 

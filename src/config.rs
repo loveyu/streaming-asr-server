@@ -1,10 +1,33 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use crate::model;
+
+/// Log verbosity. Mapped to a `tracing` level. Default is `info`.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    }
+}
 
 #[derive(Parser, Clone, Debug)]
 #[command(name = "asr-server", version, about = "Remote ASR WebSocket server based on Sherpa-ONNX")]
@@ -48,6 +71,25 @@ pub struct Config {
     #[arg(long, default_value = "16000")]
     pub sample_rate: i32,
 
+    /// Per-session idle timeout in seconds. A client may override per round via
+    /// `start.idle_seconds`. Should be >= the client's local endpoint silence
+    /// (R4). [default: 60]
+    #[arg(long, default_value = "60.0")]
+    pub idle_timeout: f64,
+
+    /// Log verbosity. Also set via `$ASR_LOG` / `$RUST_LOG`. [default: info]
+    #[arg(long, value_enum)]
+    pub log_level: Option<LogLevel>,
+
+    /// Log file path or directory. Defaults to the system log folder. Also set
+    /// via `$ASR_LOG_FILE`.
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
+
+    /// Disable file logging; write to stderr only.
+    #[arg(long, default_value_t = false)]
+    pub no_log_file: bool,
+
     #[arg(skip)]
     pub resolved_model_url: String,
 
@@ -73,5 +115,10 @@ impl Config {
             self.tls_key = Some(model::canonicalize(key)?);
         }
         Ok(())
+    }
+
+    /// Resolved default idle timeout as a `Duration`.
+    pub fn idle_timeout(&self) -> Duration {
+        Duration::from_secs_f64(self.idle_timeout.max(1.0))
     }
 }

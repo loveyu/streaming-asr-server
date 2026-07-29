@@ -37,11 +37,32 @@ asr-server [OPTIONS]
   --endpoint-silence <SEC>     端点静音阈值 [默认: 1.2]
   --endpoint-max-utterance <SEC> 单句最长时长 [默认: 20.0]
   --sample-rate <HZ>           音频采样率 [默认: 16000]
+  --idle-timeout <SEC>         单轮空闲超时（也可在 start 用 idle_seconds 按轮覆盖）[默认: 60]
+
+  --log-level <LEVEL>          日志等级：trace/debug/info/warn/error [默认: info]
+  --log-file <PATH>            日志文件（路径或目录）[默认: 系统日志目录]
+  --no-log-file                禁用文件日志，仅输出到 stderr
 ```
 
 环境变量：
 - `ASR_MODEL_URL` — 覆盖模型下载地址（优先级低于 `--model-url`）
 - `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` — 模型下载代理
+- `ASR_LOG` — 日志等级（优先级低于 `--log-level`，高于 `RUST_LOG`）
+- `ASR_LOG_FILE` — 日志文件路径（优先级低于 `--log-file`）
+
+## 日志
+
+默认同时输出到 stderr 和一个文件。日志文件位置按优先级选取：
+
+1. `--log-file` / `$ASR_LOG_FILE` 指定的路径（按字面使用）
+2. 系统日志目录 `/var/log/asr-server/asr-server.log`（无写权限时自动回退）
+3. 用户状态目录 `~/.local/state/asr-server/asr-server.log`
+4. 临时目录（兜底）
+
+日志等级默认 `info`，可用 `--log-level` / `$ASR_LOG` / `$RUST_LOG` 调整。`$ASR_LOG` 也接受
+完整 `tracing` 指令，如 `streaming_asr_server=debug,sherpa_onnx=info`。文件日志为追加写入
+（同步落盘，`SIGTERM` 不丢日志）；长期运行可用 logrotate 管理该文件。`--no-log-file` 关闭
+文件输出。
 
 ## 客户端接入
 
