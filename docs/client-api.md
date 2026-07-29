@@ -38,10 +38,10 @@ HTTP 升级请求时携带对应 Header。鉴权失败返回 HTTP `401`，响应
 服务端有并发槽位上限（默认 2，通过 `--max-sessions` 配置）。槽满时返回 HTTP `503`，响应体 JSON：
 
 ```json
-{"error":"busy","message":"All ASR slots occupied"}
+{"error":"overload","code":"overload","message":"All ASR slots occupied","fatal":false,"retry":true}
 ```
 
-客户端收到 503 不应重试当前服务端，应降级到备用节点或本地模型。
+`code` 为 `overload`、`fatal:false`、`retry:true`，属可恢复错误，与 401 鉴权响应同构（客户端可共用一套解析）。客户端收到 503 可短暂退避后重试当前服务端，或降级到备用节点/本地模型。
 
 ## 音频格式
 
@@ -150,7 +150,7 @@ PCM 16-bit LE 16000Hz 单声道原始音频。帧大小不限，建议 100ms（3
   "text": "今天天气真不错",
   "segment": 0,
   "tokens": ["今","天","天","气","真","不","错"],
-  "timestamps": [0.0, 0.32, 0.48, 0.64, 0.96, 1.12, 1.36, 1.6]
+  "timestamps": [0.0, 0.32, 0.48, 0.64, 0.96, 1.12, 1.36]
 }
 ```
 
