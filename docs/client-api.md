@@ -101,7 +101,7 @@ Client                          Server
 - `idle_seconds` 可选，客户端建议的本轮空闲超时秒数。服务端按需采纳（钳制到 5~600s）。
   未提供时使用服务端默认（`--idle-timeout`，默认 60s）。
 
-收到后服务端重置识别状态，回复 `listening`。若上一轮未 `finish` 就再次 `start`，服务端会先补发上一轮的 `final` 再开始新轮，避免已识别内容丢失。
+收到后服务端重置识别状态，回复 `listening`。若上一轮**未 `finish` 且有已识别文本**就再次 `start`，服务端会先补发上���轮的 `final` 再开始新轮，避免已识别内容丢失；若上一轮已 `finish` 或无文本，则**静默重置**，新轮首个下发帧为 `listening`（不补发空 `final`）。
 
 **结束当前句：**
 
@@ -140,7 +140,7 @@ PCM 16-bit LE 16000Hz 单声道原始音频。帧大小不限，建议 100ms（3
 }
 ```
 
-`text` 为当前累计识别文本，会随新音频数据不断更新增长。
+`text` 为当前累计识别文本，会随新音频数据不断更新增长。`partial` 仅在 `text` **非空且与上一次不同**时下发（静音段不下发空 `partial`）。
 
 **最终识别结果 (final)：**
 
@@ -205,6 +205,15 @@ PCM 16-bit LE 16000Hz 单声道原始音频。帧大小不限，建议 100ms（3
 | 空闲超时 | WS `final` + `error` | `idle` | false | true | 补发 final 后优雅关闭 |
 | 链路异常 | WS `final` + `error` | `connection` | true | true | 尝试补发 final 后关闭 |
 | 客户端正常断连 | WS `close` | — | — | — | 释放槽位 |
+
+## 协议健壮性实现状态
+
+服务端已实现需求文档中的全部服务端项（R1–R6 及 N1/N2）：
+
+- **N1**：复用连接再次 `start` 时不再下发空 `final`——上一轮无文本则静默重置（`build_final` 对空文本返回 `None`），新轮首帧为 `listening`；仅当上一轮有非空未提交文本时才补发 `final`。
+- **N2**：`partial` 仅在文本非空且与上一次不同时下发（`last_partial` 去重），静音段不再产生空 `partial`。
+
+剩余 **N3**（解析 HTTP 升级失败、区分鉴权/满载）属客户端侧（插件 `RemoteSpeechRecognizer.WsHandler.onFailure`），服务端已提供同形 JSON 体（401→`code:auth`、503→`code:overload`）供其解析。
 
 ## 客户端参考实现
 

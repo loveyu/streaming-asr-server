@@ -68,9 +68,12 @@ main.rs → ws_handler.rs → asr.rs → sherpa-onnx
 - **心跳探活（R3）**：`ws_handler.rs` 用 `tokio::select!` 在 `receiver.next()` 与 15s 心跳之间轮转；心跳发 WebSocket `Ping` 探活，并据此判定 idle。断连前尽量补发 `final` 再 close。
 - **idle 可配（R4）**：`--idle-timeout`（默认 60s）；`start` 可带 `idle_seconds` 按轮覆盖（钳制 5~600s）。
 - **鉴权结构化（R5）**：鉴权失败返回 HTTP 401 + JSON `{code:auth, fatal:true, retry:false}`。
-- **状态机（R6）**：`start → listening → partial* → final → ready` 稳定流转；重复 `start` 先补发上一轮 `final`；`final` 后清理本轮状态。
+- **状态机（R6）**：`start → listening → partial* → final → ready` 稳定流转；`final` 后清理本轮状态。重复 `start` 仅在上一轮**有非空未提交文本**时补发 `final`，否则静默重置（`build_final` 对空文本返回 `None`，N1 已实现）。
 
 连接复用时 `finish` 后回到 `ready`，不关闭连接，可重复 `start→finish`。
+
+- **抑制空 `partial`（N2）**：`Message::Binary` 分支仅在 `accept_waveform` 返回**非空且与上一次不同**的文本时下发 `partial`（`last_partial` 去重，每轮 `start`/`finish` 清空）。
+- **不下发空 `final`（N1）**：`build_final` 对空文本返回 `None`，故 `start`/`finish`/链路异常都不会补发空 `final`；仅 idle（R1）经 `finalize_round(.., true)` 强制补发空 `final` 以保留轮边界。
 
 ## 鉴权与并发顺序
 

@@ -418,6 +418,88 @@ mod tests {
         }
     }
 
+    /// N1: reusing a connection with a fresh `start` must not emit a spurious
+    /// empty `final`. After a no-text round the new round's first frame is
+    /// `listening`, and no empty `final` ever appears.
+    #[tokio::test]
+    async fn reuse_start_no_empty_final() {
+        let (addr, _handle) = test_server().await;
+        let (ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
+        let (mut write, mut read) = ws.split();
+
+        read.next().await.unwrap().unwrap(); // ready
+
+        // Round 1: start then finish with no audio (no recognized text).
+        write.send(Message::Text(r#"{"type":"start"}"#.into())).await.unwrap();
+        read.next().await.unwrap().unwrap(); // listening
+        write.send(Message::Text(r#"{"type":"finish"}"#.into())).await.unwrap();
+
+        // Drain round 1: must reach `ready` with no empty `final` sneaking in.
+        loop {
+            let msg = timeout(Duration::from_secs(5), read.next()).await;
+            match msg {
+                Ok(Some(Ok(msg))) => {
+                    let text = msg.into_text().unwrap();
+                    let t = field(&text, "type");
+                    assert_ne!(t, "final", "no spurious final on no-text finish (N1)");
+                    if t == "status" && field(&text, "state") == "ready" {
+                        break;
+                    }
+                }
+                _ => panic!("connection closed before ready"),
+            }
+        }
+
+        // Round 2: reuse the connection. First frame must be `listening`.
+        write.send(Message::Text(r#"{"type":"start"}"#.into())).await.unwrap();
+        let msg = read.next().await.unwrap().unwrap();
+        let text = msg.into_text().unwrap();
+        assert_eq!(field(&text, "type"), "status");
+        assert_eq!(
+            field(&text, "state"),
+            "listening",
+            "reused start must begin with listening, not a leftover final (N1)"
+        );
+    }
+
+    /// N2: silence must not produce empty `partial` frames.
+    #[tokio::test]
+    async fn silence_emits_no_empty_partial() {
+        let (addr, _handle) = test_server().await;
+        let (ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
+        let (mut write, mut read) = ws.split();
+
+        read.next().await.unwrap().unwrap(); // ready
+        write.send(Message::Text(r#"{"type":"start"}"#.into())).await.unwrap();
+        read.next().await.unwrap().unwrap(); // listening
+
+        // Feed ~600ms of silence in 100ms chunks.
+        for _ in 0..6 {
+            let pcm: Vec<u8> = vec![0; 3200];
+            write.send(Message::Binary(pcm.into())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Drain briefly; any partial must be non-empty.
+        let deadline = Duration::from_millis(400);
+        loop {
+            match timeout(deadline, read.next()).await {
+                Ok(Some(Ok(msg))) => {
+                    let text = msg.into_text().unwrap();
+                    if field(&text, "type") == "partial" {
+                        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        assert!(
+                            !v["text"].as_str().unwrap_or("").is_empty(),
+                            "empty partial leaked from silence (N2): {text}"
+                        );
+                    }
+                }
+                Ok(Some(Err(_))) => panic!("unexpected WS error"),
+                Ok(None) | Err(_) => break, // timeout / close — nothing more to check
+            }
+        }
+    }
+
     #[tokio::test]
     async fn audio_real_file_pipeline() {
         let (addr, _handle) = test_server().await;

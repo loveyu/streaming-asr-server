@@ -39,9 +39,17 @@ fn close_frame(reason: &str) -> Message {
 }
 
 /// Build a `final` message from whatever the engine has decoded so far.
-/// Returns `None` when there is no recognized text yet.
+///
+/// Returns `None` when the engine has no text, so a spurious empty `final` is
+/// never emitted on `start`/`finish`/link errors (N1). The idle path still
+/// forces an (empty) `final` via `finalize_round(.., true)` to preserve the
+/// round boundary (R1).
 fn build_final(engine: &AsrEngine, stream: &mut AsrStream, segment: u32) -> Option<ServerMessage> {
-    engine.flush(stream).map(|(text, tokens, timestamps)| ServerMessage::Final {
+    let (text, tokens, timestamps) = engine.flush(stream)?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(ServerMessage::Final {
         text,
         segment,
         tokens,
@@ -90,6 +98,8 @@ pub async fn handle_ws(ws: WebSocket, engine: Arc<AsrEngine>, _guard: SessionGua
 
     let mut stream: Option<AsrStream> = None;
     let mut segment: u32 = 0;
+    // Last emitted partial text, for de-duplication (N2). Cleared each round.
+    let mut last_partial: String = String::new();
     let mut idle_timeout = idle_default;
     let mut last_activity = Instant::now();
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -140,11 +150,17 @@ pub async fn handle_ws(ws: WebSocket, engine: Arc<AsrEngine>, _guard: SessionGua
                         if let Some(partial_text) =
                             engine.accept_waveform(stream.as_mut().unwrap(), samples)
                         {
-                            let msg = ServerMessage::Partial {
-                                text: partial_text,
-                                segment,
-                            };
-                            let _ = sender.send(text_msg(&msg)).await;
+                            // N2: silence decodes to an empty string on every
+                            // chunk; only emit a partial when the text is
+                            // non-empty and has actually changed.
+                            if !partial_text.is_empty() && partial_text != last_partial {
+                                last_partial = partial_text.clone();
+                                let msg = ServerMessage::Partial {
+                                    text: partial_text,
+                                    segment,
+                                };
+                                let _ = sender.send(text_msg(&msg)).await;
+                            }
                         }
                     }
                     Message::Text(text) => {
@@ -162,11 +178,15 @@ pub async fn handle_ws(ws: WebSocket, engine: Arc<AsrEngine>, _guard: SessionGua
 
                         match cmd {
                             ClientMessage::Start(cmd) => {
-                                // R6: finalize any in-flight round before (re)starting.
+                                // N1: drop any leftover text from the previous
+                                // round — only a non-empty result is emitted as
+                                // `final`, otherwise the round resets silently so
+                                // the new round's first frame is always `listening`.
                                 finalize_round(&mut sender, &engine, &mut stream, &mut segment, false).await;
 
                                 let sample_rate = cmd.sample_rate;
                                 stream = Some(engine.create_stream(sample_rate));
+                                last_partial.clear();
 
                                 // R4: adopt client-suggested idle, clamped; else default.
                                 idle_timeout = cmd
@@ -184,6 +204,7 @@ pub async fn handle_ws(ws: WebSocket, engine: Arc<AsrEngine>, _guard: SessionGua
                             }
                             ClientMessage::Finish => {
                                 finalize_round(&mut sender, &engine, &mut stream, &mut segment, false).await;
+                                last_partial.clear();
                                 let _ = sender.send(text_msg(&ServerMessage::ready())).await;
                                 tracing::debug!("round finished, back to ready");
                             }
